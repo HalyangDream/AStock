@@ -1,0 +1,4 @@
+akshare==1.18.56
+pandas==2.3.3
+backtrader==1.9.78.123
+streamlit==1.40.2
