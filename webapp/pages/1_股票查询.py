@@ -97,14 +97,9 @@ st.download_button(
 # 网格交易参数 + 寻优按钮
 st.divider()
 st.subheader("网格交易测试")
-gcol1, gcol2 = st.columns(2)
-with gcol1:
-    levels = st.number_input("层数（上下各 N 档）",
-                             min_value=1, max_value=50, value=10, step=1)
-with gcol2:
-    totalAmount = st.number_input("总金额（元）",
-                                  min_value=10000.0, value=100000.0,
-                                  step=10000.0)
+totalAmount = st.number_input("总金额（元）",
+                              min_value=10000.0, value=100000.0,
+                              step=10000.0)
 
 runGrid = st.button("网格交易测试", key="run_grid_test", type="secondary")
 
@@ -115,12 +110,12 @@ if runGrid:
         progress.progress(
             idx / total,
             text=(f"[{idx}/{total}] 步长 {summaryRow['spacing']:.2%} · "
+                  f"层数 {summaryRow['levels']} · "
                   f"总收益 {summaryRow['totalReturn']:.2%}"),
         )
 
     try:
-        result = services.runGridOptimize(df, int(levels),
-                                          float(totalAmount),
+        result = services.runGridOptimize(df, float(totalAmount),
                                           progressCb=_onProgress)
         st.session_state.gridResult = result
     except Exception as exc:
@@ -142,7 +137,10 @@ if "gridResult" in st.session_state:
     else:
         view = top.rename(columns={
             "spacing": "步长",
+            "levels": "层数",
             "totalReturn": "总收益",
+            "holdReturn": "持有收益",
+            "excessReturn": "网格超额",
             "annualReturn": "年化",
             "sharpe": "夏普",
             "maxDrawdown": "最大回撤",
@@ -151,17 +149,20 @@ if "gridResult" in st.session_state:
             "summary": "摘要",
         }).copy()
         view["步长"] = view["步长"].apply(lambda x: f"{x:.2%}")
-        for col in ("总收益", "年化", "最大回撤", "胜率"):
+        for col in ("总收益", "持有收益", "网格超额",
+                    "年化", "最大回撤", "胜率"):
             view[col] = view[col].apply(lambda x: f"{x:.2%}")
         view["夏普"] = view["夏普"].apply(lambda x: f"{x:.2f}")
-        view = view[["步长", "总收益", "年化", "夏普",
-                     "最大回撤", "胜率", "交易次数", "摘要"]]
+        view = view[["步长", "层数", "总收益", "持有收益", "网格超额",
+                     "年化", "夏普", "最大回撤", "胜率",
+                     "交易次数", "摘要"]]
         st.dataframe(view, use_container_width=True, hide_index=True)
 
     if best and best.get("metrics"):
         m = best["metrics"]
         st.subheader(
             f"最优组合详情：步长 {best['spacing']:.2%} · "
+            f"层数 {best.get('levels', 0)} · "
             f"每格 {best['shareSize']} 股 · "
             f"中心 {best.get('centerPrice', 0):.2f}"
         )
@@ -169,14 +170,15 @@ if "gridResult" in st.session_state:
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("总收益", f"{m.get('totalReturn', 0):.2%}")
-        c2.metric("年化", f"{m.get('annualReturn', 0):.2%}")
-        c3.metric("夏普", f"{m.get('sharpe', 0):.2f}")
-        c4.metric("最大回撤", f"{m.get('maxDrawdown', 0):.2%}")
+        c2.metric("持有收益", f"{best.get('holdReturn', 0):.2%}")
+        c3.metric("网格超额", f"{best.get('excessReturn', 0):.2%}")
+        c4.metric("年化", f"{m.get('annualReturn', 0):.2%}")
 
-        c5, c6, c7 = st.columns(3)
-        c5.metric("交易次数", int(m.get("tradeCount", 0)))
-        c6.metric("胜率", f"{m.get('winRate', 0):.2%}")
-        c7.metric("平均持有(日)", f"{m.get('avgHoldDays', 0):.1f}")
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("夏普", f"{m.get('sharpe', 0):.2f}")
+        c6.metric("最大回撤", f"{m.get('maxDrawdown', 0):.2%}")
+        c7.metric("胜率", f"{m.get('winRate', 0):.2%}")
+        c8.metric("交易次数", int(m.get("tradeCount", 0)))
 
         eq = best.get("equityCurve")
         if eq is not None and not eq.empty and "date" in eq.columns:

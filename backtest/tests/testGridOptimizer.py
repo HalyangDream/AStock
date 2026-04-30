@@ -1,4 +1,4 @@
-"""gridOptimize / autoShareSize 测试。"""
+"""gridOptimize / autoShareSize 测试（二维寻优 + 持有收益基准）。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ import numpy as np
 import pandas as pd
 
 from backtest import gridOptimize
-from backtest.gridOptimizer import autoShareSize
+from backtest.gridOptimizer import (DEFAULT_LEVELS_LIST, DEFAULT_SPACINGS,
+                                    autoShareSize)
 from backtest.tests._helpers import buildLinearKline
 
 
@@ -29,6 +30,19 @@ def _oscKline(days: int = 60, amplitude: float = 0.05,
     })
 
 
+def _fakeResult(totalReturn: float = 0.0) -> dict:
+    return {
+        "equityCurve": pd.DataFrame(),
+        "trades": pd.DataFrame(),
+        "tradeEvents": pd.DataFrame(),
+        "openPositions": pd.DataFrame(),
+        "metrics": {"totalReturn": totalReturn, "annualReturn": 0.0,
+                    "sharpe": 0.0, "maxDrawdown": 0.0,
+                    "winRate": 0.0, "tradeCount": 0},
+        "summary": "mock",
+    }
+
+
 class TestAutoShareSize(unittest.TestCase):
 
     def test_normalCase(self) -> None:
@@ -37,7 +51,6 @@ class TestAutoShareSize(unittest.TestCase):
         self.assertEqual(autoShareSize(100000, 10, 10.0), 400)
 
     def test_minimumOneHand(self) -> None:
-        # 资金过小，按下取整为 0，需要兜底为 100 股
         self.assertEqual(autoShareSize(100, 10, 10.0), 100)
 
     def test_invalidRaises(self) -> None:
@@ -54,19 +67,19 @@ class TestGridOptimize(unittest.TestCase):
     def test_invalidParamsRaise(self) -> None:
         kline = buildLinearKline(days=10)
         with self.assertRaises(ValueError):
-            gridOptimize(kline, levels=0, totalAmount=100000)
+            gridOptimize(kline, totalAmount=0)
         with self.assertRaises(ValueError):
-            gridOptimize(kline, levels=10, totalAmount=0)
+            gridOptimize(pd.DataFrame(), totalAmount=100000)
         with self.assertRaises(ValueError):
-            gridOptimize(pd.DataFrame(), levels=10, totalAmount=100000)
+            gridOptimize(kline, totalAmount=100000, rankBy="bogus")
         with self.assertRaises(ValueError):
-            gridOptimize(kline, levels=10, totalAmount=100000,
-                         rankBy="bogus")
+            gridOptimize(kline, totalAmount=100000, levelsList=[0, 5])
 
     def test_topSortedByRankKey(self) -> None:
         kline = _oscKline(days=60, amplitude=0.06, period=15)
-        out = gridOptimize(kline, levels=5, totalAmount=100000,
-                           spacings=[0.01, 0.02, 0.05])
+        out = gridOptimize(kline, totalAmount=100000,
+                           spacings=[0.01, 0.02, 0.05],
+                           levelsList=[5])
         self.assertEqual(len(out["candidates"]), 3)
         self.assertEqual(len(out["top"]), 3)
         rets = [c["totalReturn"] for c in out["top"]]
@@ -77,38 +90,84 @@ class TestGridOptimize(unittest.TestCase):
         self.assertIn("metrics", out["best"])
         self.assertIn("shareSize", out["best"])
         self.assertIn("centerPrice", out["best"])
+        self.assertIn("levels", out["best"])
+        self.assertIn("holdReturn", out["best"])
+        self.assertIn("excessReturn", out["best"])
 
     def test_progressCallback(self) -> None:
         kline = _oscKline(days=40, amplitude=0.04, period=10)
         calls: list = []
-        gridOptimize(kline, levels=3, totalAmount=50000,
+        gridOptimize(kline, totalAmount=50000,
                      spacings=[0.01, 0.03, 0.05],
-                     progressCb=lambda i, n, s: calls.append((i, n, s["spacing"])))
-        self.assertEqual([c[0] for c in calls], [1, 2, 3])
-        self.assertTrue(all(c[1] == 3 for c in calls))
+                     levelsList=[3, 5],
+                     progressCb=lambda i, n, s: calls.append(
+                         (i, n, s["spacing"], s["levels"])))
+        self.assertEqual([c[0] for c in calls], [1, 2, 3, 4, 5, 6])
+        self.assertTrue(all(c[1] == 6 for c in calls))
 
     def test_centerPriceUsesFirstClose(self) -> None:
-        """中心价自动取首日 close（避免未来函数偏差）。"""
         kline = buildLinearKline(days=20)
         expectedFirst = float(kline.sort_values("date")["close"].iloc[0])
-        fake = {
-            "equityCurve": pd.DataFrame(),
-            "trades": pd.DataFrame(),
-            "openPositions": pd.DataFrame(),
-            "metrics": {"totalReturn": 0.0, "annualReturn": 0.0,
-                        "sharpe": 0.0, "maxDrawdown": 0.0,
-                        "winRate": 0.0, "tradeCount": 0},
-            "summary": "mock",
-        }
         with mock.patch("backtest.gridOptimizer.runGridBacktest",
-                        return_value=fake) as m:
-            out = gridOptimize(kline, levels=5, totalAmount=100000,
-                               spacings=[0.01, 0.02])
+                        return_value=_fakeResult()) as m:
+            out = gridOptimize(kline, totalAmount=100000,
+                               spacings=[0.01, 0.02],
+                               levelsList=[5])
         for call in m.call_args_list:
             self.assertAlmostEqual(call.kwargs["centerPrice"],
                                    expectedFirst, places=6)
         self.assertAlmostEqual(out["best"]["centerPrice"],
                                expectedFirst, places=6)
+
+    def test_defaultGridIs66(self) -> None:
+        """默认遍历 11 spacings × 6 levels = 66 组合。"""
+        kline = buildLinearKline(days=10)
+        with mock.patch("backtest.gridOptimizer.runGridBacktest",
+                        return_value=_fakeResult()):
+            out = gridOptimize(kline, totalAmount=100000)
+        expected = len(DEFAULT_SPACINGS) * len(DEFAULT_LEVELS_LIST)
+        self.assertEqual(len(out["candidates"]), expected)
+        self.assertEqual(expected, 66)
+
+    def test_levelsTraversed(self) -> None:
+        """每个 spacing 都应遍历完整 levelsList。"""
+        kline = buildLinearKline(days=10)
+        with mock.patch("backtest.gridOptimizer.runGridBacktest",
+                        return_value=_fakeResult()) as m:
+            gridOptimize(kline, totalAmount=100000,
+                         spacings=[0.02], levelsList=[3, 5, 8])
+        seenLevels = sorted({c.kwargs["gridLevels"]
+                             for c in m.call_args_list})
+        self.assertEqual(seenLevels, [3, 5, 8])
+
+    def test_holdReturnLinearUp(self) -> None:
+        """线性上涨：holdReturn ≈ (lastClose / firstClose - 1)。"""
+        kline = buildLinearKline(days=20, dailyReturn=0.005)
+        sortedKline = kline.sort_values("date")
+        firstClose = float(sortedKline["close"].iloc[0])
+        lastClose = float(sortedKline["close"].iloc[-1])
+        with mock.patch("backtest.gridOptimizer.runGridBacktest",
+                        return_value=_fakeResult(totalReturn=0.0)):
+            out = gridOptimize(kline, totalAmount=100000,
+                               spacings=[0.02], levelsList=[5])
+        priceReturn = lastClose / firstClose - 1
+        self.assertAlmostEqual(out["candidates"][0]["holdReturn"],
+                               priceReturn, delta=0.01)
+
+    def test_excessReturnConsistent(self) -> None:
+        """excessReturn = totalReturn - holdReturn。"""
+        kline = buildLinearKline(days=15)
+        with mock.patch("backtest.gridOptimizer.runGridBacktest",
+                        return_value=_fakeResult(totalReturn=0.05)):
+            out = gridOptimize(kline, totalAmount=100000,
+                               spacings=[0.02], levelsList=[5])
+        for row in out["candidates"]:
+            self.assertAlmostEqual(
+                row["excessReturn"],
+                row["totalReturn"] - row["holdReturn"], places=8)
+        self.assertAlmostEqual(
+            out["best"]["excessReturn"],
+            0.05 - out["best"]["holdReturn"], places=8)
 
 
 if __name__ == "__main__":

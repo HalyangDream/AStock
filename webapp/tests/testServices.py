@@ -235,30 +235,33 @@ class TestRunGridOptimize(unittest.TestCase):
             "volume": [1000.0] * days,
         })
 
-    def test_invalidLevelsRaises(self) -> None:
-        with self.assertRaises(ValueError):
-            services.runGridOptimize(self._kline(), 0, 100000)
-
     def test_invalidTotalAmountRaises(self) -> None:
         with self.assertRaises(ValueError):
-            services.runGridOptimize(self._kline(), 10, 0)
+            services.runGridOptimize(self._kline(), 0)
 
     def test_emptyKlineRaises(self) -> None:
         with self.assertRaises(ValueError):
-            services.runGridOptimize(pd.DataFrame(), 10, 100000)
+            services.runGridOptimize(pd.DataFrame(), 100000)
 
     def test_delegatesToBacktestModule(self) -> None:
         fake = {
-            "candidates": [{"spacing": 0.02, "totalReturn": 0.1}],
-            "top": [{"spacing": 0.02, "totalReturn": 0.1}],
-            "best": {"spacing": 0.02, "metrics": {"totalReturn": 0.1},
+            "candidates": [{"spacing": 0.02, "levels": 5,
+                            "totalReturn": 0.1, "holdReturn": 0.05,
+                            "excessReturn": 0.05}],
+            "top": [{"spacing": 0.02, "levels": 5,
+                     "totalReturn": 0.1, "holdReturn": 0.05,
+                     "excessReturn": 0.05}],
+            "best": {"spacing": 0.02, "levels": 5,
+                     "metrics": {"totalReturn": 0.1},
+                     "holdReturn": 0.05, "excessReturn": 0.05,
                      "summary": "ok"},
         }
         with mock.patch("backtest.gridOptimize", return_value=fake) as m:
-            out = services.runGridOptimize(self._kline(), 10, 100000)
+            out = services.runGridOptimize(self._kline(), 100000)
         m.assert_called_once()
         self.assertEqual(out, fake)
         self.assertNotIn("centerPrice", m.call_args.kwargs)
+        self.assertNotIn("levels", m.call_args.kwargs)
 
 
 if __name__ == "__main__":

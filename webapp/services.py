@@ -166,16 +166,15 @@ def clearNameCache() -> None:
 
 
 def runGridOptimize(kline: pd.DataFrame,
-                    levels: int,
                     totalAmount: float,
                     progressCb=None) -> dict:
-    """对 K 线运行网格策略步长寻优。
+    """对 K 线运行网格策略二维寻优（步长 × 层数）。
 
-    中心价由引擎自动取首日 close（避免未来函数偏差），用户只需提供层数和总金额。
+    中心价由引擎自动取首日 close（避免未来函数偏差），用户只需提供总金额。
+    步长 / 层数候选集由 backtest 层默认值决定。
 
     Args:
         kline: 含 date / open / high / low / close / volume
-        levels: 上下各档位数（用户输入）
         totalAmount: 总金额（用户输入，用于初始现金）
         progressCb: 进度回调 (idx, total, summaryDict)
 
@@ -184,12 +183,10 @@ def runGridOptimize(kline: pd.DataFrame,
     """
     from backtest import gridOptimize
 
-    if levels <= 0:
-        raise ValueError("层数必须 > 0")
     if totalAmount <= 0:
         raise ValueError("总金额必须 > 0")
     if kline is None or kline.empty:
         raise ValueError("K 线为空，无法寻优")
-    return gridOptimize(kline, levels=int(levels),
+    return gridOptimize(kline,
                         totalAmount=float(totalAmount),
                         progressCb=progressCb)
