@@ -135,10 +135,13 @@ if "gridResult" in st.session_state:
     if top.empty:
         st.info("无候选结果。")
     else:
-        view = top.rename(columns={
+        view = top.copy()
+        view["totalPnl"] = view["totalReturn"] * float(totalAmount)
+        view = view.rename(columns={
             "spacing": "步长",
             "levels": "层数",
             "totalReturn": "总收益",
+            "totalPnl": "盈亏(元)",
             "holdReturn": "持有收益",
             "excessReturn": "网格超额",
             "annualReturn": "年化",
@@ -147,13 +150,15 @@ if "gridResult" in st.session_state:
             "winRate": "胜率",
             "tradeCount": "交易次数",
             "summary": "摘要",
-        }).copy()
+        })
         view["步长"] = view["步长"].apply(lambda x: f"{x:.2%}")
+        view["盈亏(元)"] = view["盈亏(元)"].apply(lambda x: f"¥{x:+,.0f}")
         for col in ("总收益", "持有收益", "网格超额",
                     "年化", "最大回撤", "胜率"):
             view[col] = view[col].apply(lambda x: f"{x:.2%}")
         view["夏普"] = view["夏普"].apply(lambda x: f"{x:.2f}")
-        view = view[["步长", "层数", "总收益", "持有收益", "网格超额",
+        view = view[["步长", "层数", "总收益", "盈亏(元)",
+                     "持有收益", "网格超额",
                      "年化", "夏普", "最大回撤", "胜率",
                      "交易次数", "摘要"]]
         st.dataframe(view, use_container_width=True, hide_index=True)
@@ -163,22 +168,61 @@ if "gridResult" in st.session_state:
         st.subheader(
             f"最优组合详情：步长 {best['spacing']:.2%} · "
             f"层数 {best.get('levels', 0)} · "
-            f"每格 {best['shareSize']} 股 · "
-            f"中心 {best.get('centerPrice', 0):.2f}"
+            f"每格 {best['shareSize']} 股"
         )
         st.code(best["summary"], language="text")
 
+        _eq = best.get("equityCurve")
+        _initCash = float(totalAmount)
+        _finalValue = float(_eq["value"].iloc[-1]) if (
+            _eq is not None and not _eq.empty) else _initCash
+        _totalPnl = _finalValue - _initCash
+
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("总收益", f"{m.get('totalReturn', 0):.2%}")
-        c2.metric("持有收益", f"{best.get('holdReturn', 0):.2%}")
-        c3.metric("网格超额", f"{best.get('excessReturn', 0):.2%}")
-        c4.metric("年化", f"{m.get('annualReturn', 0):.2%}")
+        c1.metric("初始资金", f"¥{_initCash:,.0f}")
+        c2.metric("最终资金", f"¥{_finalValue:,.0f}")
+        c3.metric("总盈亏", f"¥{_totalPnl:+,.0f}")
+        c4.metric("总收益", f"{m.get('totalReturn', 0):.2%}")
 
         c5, c6, c7, c8 = st.columns(4)
-        c5.metric("夏普", f"{m.get('sharpe', 0):.2f}")
-        c6.metric("最大回撤", f"{m.get('maxDrawdown', 0):.2%}")
-        c7.metric("胜率", f"{m.get('winRate', 0):.2%}")
-        c8.metric("交易次数", int(m.get("tradeCount", 0)))
+        c5.metric("持有收益", f"{best.get('holdReturn', 0):.2%}")
+        c6.metric("网格超额", f"{best.get('excessReturn', 0):.2%}")
+        c7.metric("年化", f"{m.get('annualReturn', 0):.2%}")
+        c8.metric("夏普", f"{m.get('sharpe', 0):.2f}")
+
+        c9, c10, c11, c12 = st.columns(4)
+        c9.metric("最大回撤", f"{m.get('maxDrawdown', 0):.2%}")
+        c10.metric("胜率", f"{m.get('winRate', 0):.2%}")
+        c11.metric("交易次数", int(m.get("tradeCount", 0)))
+        c12.metric("平均持仓天数", f"{m.get('avgHoldDays', 0):.1f}")
+
+        gi = best.get("gridInfo")
+        if gi:
+            st.subheader("网格范围")
+            gc1, gc2, gc3, gc4 = st.columns(4)
+            gc1.metric("基准价", f"¥{gi['centerPrice']:.4f}")
+            gc2.metric("网格下界", f"¥{gi['gridLow']:.4f}")
+            gc3.metric("网格上界", f"¥{gi['gridHigh']:.4f}")
+            gc4.metric("买入范围",
+                       f"¥{gi['buyRange'][0]:.4f} ~ ¥{gi['buyRange'][1]:.4f}")
+            gc5, gc6, gc7, gc8 = st.columns(4)
+            gc5.metric("卖出范围",
+                       f"¥{gi['sellRange'][0]:.4f} ~ ¥{gi['sellRange'][1]:.4f}")
+            gc6.metric("K线最低价", f"¥{gi['priceLow']:.4f}")
+            gc7.metric("K线最高价", f"¥{gi['priceHigh']:.4f}")
+            inRange = (min(gi["priceHigh"], gi["gridHigh"])
+                       - max(gi["priceLow"], gi["gridLow"]))
+            totalRange = gi["priceHigh"] - gi["priceLow"]
+            coverage = max(0.0, inRange / totalRange) if totalRange > 0 else 0.0
+            gc8.metric("价格覆盖率", f"{coverage:.0%}")
+
+            gridLinesDf = pd.DataFrame([
+                {"层级": lvl, "网格线价格": price}
+                for lvl, price in sorted(gi["gridLines"].items())
+            ])
+            with st.expander("查看全部网格线"):
+                st.dataframe(gridLinesDf, use_container_width=True,
+                             hide_index=True)
 
         eq = best.get("equityCurve")
         if eq is not None and not eq.empty and "date" in eq.columns:
@@ -213,7 +257,7 @@ if "gridResult" in st.session_state:
 
         openPos = best.get("openPositions")
         openColMap = {
-            "entryDate": "买入日",
+            "entryDate": "买入日期",
             "entryPrice": "买入价",
             "size": "数量",
             "lastPrice": "现价",
@@ -221,7 +265,7 @@ if "gridResult" in st.session_state:
             "unrealizedPnlPct": "浮动收益率",
         }
         if openPos is not None and not openPos.empty:
-            st.subheader(f"未平仓持仓（{len(openPos)} 笔）")
+            st.subheader("未平仓持仓")
             openView = openPos.rename(columns=openColMap)
             st.dataframe(openView, use_container_width=True,
                          hide_index=True)

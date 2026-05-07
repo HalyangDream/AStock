@@ -17,7 +17,7 @@ A 股 / 基金多源数据采集、形态扫描、网格交易回测工具。四
 .venv/bin/streamlit run webapp/app.py
 ```
 
-**测试命令**（backtest 层 40 个用例全部通过）：
+**测试命令**（backtest 层 44 个 + webapp 层 29 个用例全部通过）：
 
 ```bash
 .venv/bin/python -m unittest discover -s backtest -t . -p 'test*.py' -v
@@ -52,58 +52,63 @@ A 股 / 基金多源数据采集、形态扫描、网格交易回测工具。四
 - `backtest/results.py` — cerebro 输出 → 标准 DataFrame
 - `backtest/metrics.py` — 绩效指标（winRate / avgPnlPct 优先用 `pnlNet` 净收益口径）
 
-### 2.4 回测层 — 网格交易（最近主要工作，刚稳定）
+### 2.4 回测层 — 网格交易（v7 静态网格重写）
 
 **核心文件 `backtest/_gridStrategy.py`** 经历了多轮重构：
 
 | 版本 | 关键变化 |
 |---|---|
-| v1 | 空仓低吸网格，close 判断，无底仓 |
-| v2 | 加初始底仓（Market 单），改 high/low 触发 |
-| v3 | 改 close 方向触发（消除日内顺序歧义），加 `_filledLevels` 每档单次持仓 |
-| v4（当前） | 修 `_level()` 浮点精度（epsilon 吸附），卖出改为"最高 N 个已填充档位"（修复底仓上涨不卖），`_openTrades` 从 FIFO list 改为 per-level dict（level-aware 配对） |
+| v1~v4 | 固定中心价 + 档位模型，详见 git 历史 |
+| v5 | 手动撮合重写：移除 backtrader broker 依赖，建仓按首日 close，格线价成交 |
+| v6 | 动态基准价：基准价每次交易后更新，网格跟随价格移动 |
+| v7（当前） | **静态网格重写**：基准价固定不变，几何级数网格线，买 Level L → 卖 Level L+1，每笔赚一格间距 |
 
 **当前 `_gridStrategy.py` 设计要点**：
 
-- **中心价**：外部传入（寻优器传首日 close），消除未来函数偏差
-- **档位计算**：`_level(price)` = `floor(log(price/center)/log(1+spacing))`，精确网格线时 epsilon 吸附（`_LEVEL_EPS = 1e-9`）
-- **每档仅持一份**：`_filledLevels: Set[int]` 跟踪，买→卖→买 严格循环
-- **初始底仓**：首根 bar 对 initLevel-1 到 -gridLevels 下 Market 单，次日开盘成交
-- **触发方向**：只看 close — closeLevel < lastLevel 只 buy，closeLevel > lastLevel 只 sell
-- **买入范围**：`range(lastLevel-1, closeLevel-1, -1)`，跳过已填充档位
-- **卖出范围**：`sorted(_filledLevels, reverse=True)[:sellCount]`，卖最高 N 个已填充档
-- **拒单回滚**：`_orderLevelMap` 映射 orderRef→level，Canceled/Margin/Rejected 时恢复 `_filledLevels`
-- **交易配对**：Level-aware（`_openTrades: Dict[int, dict]`），卖出 level L 精确关闭 level L 的买入记录
+- **静态基准价**：`_centerPrice` = 首日 close（或外部传入），全程固定不变
+- **几何网格线**：`gridLinePrice(n) = centerPrice × (1 + spacing)^n`，n ∈ [-gridLevels, +gridLevels]
+- **建仓**：首根 bar 以 close 买入 1 份 @ Level 0
+- **买入触发**：Level L（L ≤ 0）未填充 且 low ≤ gridLinePrice(L) → 以 gridLinePrice(L) 成交；正档位仅作卖出目标价，不可买入
+- **卖出触发**：Level L 已填充 且 high ≥ gridLinePrice(L+1) → 以 gridLinePrice(L+1) 成交
+- **闭合利润**：每笔 = gridLinePrice(L+1) - gridLinePrice(L) - 手续费
+- **级联交易**：单根 bar 内可同时触发多笔买入和卖出
+- **round-trip 保护**：同一 bar 内同一 Level 最多变化一次状态（changedLevels 集合）
+- **持仓管理**：`_filledLevels` Set 跟踪已填充层级，`_openTrades` Dict[int, dict] 按 level 精确配对
+- **佣金手动计算**：买入 = price × size × commission，卖出 = price × size × (commission + stampTax)
+- **权益追踪**：`_equityRecords` 每 bar 记录 cash + 持仓市值
 
 **`backtest/gridOptimizer.py`**：
 
-- `centerPrice = sortedKline["close"].iloc[0]`（首日 close）
-- `autoShareSize`：总资金 / (levels x 2)，下半底仓、上半补仓弹药
-- 遍历 11 档 DEFAULT_SPACINGS，按 totalReturn 排序，返回 top 5
+- `autoShareSize`：总资金 / (levels × 2)，一半持仓、一半补仓弹药
+- 遍历 11 档 DEFAULT_SPACINGS × 6 档 DEFAULT_LEVELS_LIST 二维寻优，按 rankBy 排序，返回 top N
+- centerPrice 自动取首日 close
 
 **`backtest/gridEngine.py`**：
 
-- `runGridBacktest` 搭建 Cerebro，读取 `strat._tradeLog` 和 `list(strat._openTrades.values())`
-- 返回 `{ equityCurve, trades, openPositions, metrics, summary }`
+- `runGridBacktest` 搭建 Cerebro 驱动 bar 循环，撮合由策略内部手动完成
+- 参数：`gridSpacingPct / gridLevels / shareSize / centerPrice / commission / stampTax`
+- 读取 `strat._equityRecords`、`strat._tradeLog`、`strat._eventLog`、`strat._openTrades`
+- 返回 `{ equityCurve, trades, tradeEvents, openPositions, metrics, summary }`
 
 ### 2.5 网页层（稳定）
 
-- `webapp/pages/1_K线查询.py` — K 线查询 + 网格交易测试（层数 / 总金额输入 → Top5 候选 + 最优详情 + 净值曲线 + 交易明细 + 未平仓）
-- `webapp/services.py` — 纯函数封装，文案已同步为"中心价 = 首日 close"
+- `webapp/pages/1_K线查询.py` — K 线查询 + 网格交易测试（总金额输入 → Top5 候选 + 最优详情 + 净值曲线 + 交易明细 + per-level 未平仓）
+- `webapp/services.py` — 纯函数封装，文案已同步为静态网格模型
 - 其他 3 个页面（行业板块 / 资金流 / 财务摘要）功能完整
 
 ---
 
 ## 三、当前测试覆盖
 
-`backtest/tests/` 共 5 个测试文件，约 40 个测试用例，全部通过：
+`backtest/tests/` 共 5 个测试文件，44 个测试用例，全部通过：
 
-- **testGridEngine.py**（16 个）：参数校验、震荡交易、V 形卖出、纯上涨卖底仓、小资金跳过、未平仓、底仓建立、单 bar、close 方向过滤、多 level 跳跃、极端偏离、不重复买、level-aware 配对、浮点精度
-- **testGridOptimizer.py**（6 个）：autoShareSize + gridOptimize（中心价首日 close、排序、进度回调）
+- **testGridEngine.py**（20 个）：参数校验、几何网格线验证、建仓仅 Level 0、网格线固定不变、买 L 卖 L+1 配对（赚一格间距）、每笔 pnlNet > 0、级联买入/卖出、持仓上限、V 形整体盈利、震荡产生交易、单 bar 无交易、小资金跳过、无同 bar round-trip、per-level 未平仓持仓
+- **testGridOptimizer.py**（8 个）：autoShareSize + gridOptimize（排序、进度回调、levels 遍历完整度、持有收益、超额收益一致性）
 - **testMetrics.py**（5 个）：空输入、单调增长、回撤、胜率(pnlNet)、摘要格式
 - **testEngine.py**（7 个）：信号回测基础
 - **testAdapters.py**（5 个）：形态→信号转换
-- **testServices.py**（1 个）：webapp 服务层
+
+`webapp/tests/` 共 29 个测试用例，全部通过。
 
 ---
 
@@ -117,6 +122,9 @@ A 股 / 基金多源数据采集、形态扫描、网格交易回测工具。四
 | 网格交易 0 交易 + centerPrice 极低（0.01） | `_lastLevel` 不更新导致策略冻结 + centerPrice 用 median 引入未来函数 | `_lastLevel` 每次都更新；centerPrice 改为首日 close |
 | `ImportError: relative import beyond top-level` | unittest discover 缺少 `-t .` 参数 | 命令改为 `.venv/bin/python -m unittest discover -s astock -t . -p 'test*.py'` |
 | `ModuleNotFoundError: webapp` | Streamlit 把脚本目录设为 sys.path[0] | 各入口文件头部注入项目根到 sys.path |
+| 亏损保护条件反向（买 10 卖 10 扣费亏损） | `lossThreshold = close*(1+spacing)`，允许平价卖出导致扣费后必亏 | v5 手动撮合重写：删除 lossThreshold，网格买卖以格线价成交（间距天然覆盖费用） |
+| Market 单次日开盘成交 ≠ 网格线价 | close 触发 + Market 单 → 成交价为次日 open，跳空导致网格亏损 | v5 改为手动撮合：买以 gridLinePrice(L) 成交，卖以 gridLinePrice(L+1) 成交 |
+| 底仓全部以同一开盘价成交（非各自格线价） | 首 bar Market 单 → 次日同一 open 成交 | v5 建仓改为以首日 close 成交（用户确认的设计选择） |
 
 ---
 
@@ -126,7 +134,7 @@ A 股 / 基金多源数据采集、形态扫描、网格交易回测工具。四
 - **BaoStock 未接入**：不希望额外登录态
 - **分钟级网格**：当前只支持日 K 线
 - **止损/止盈**：网格没有全局止损或单笔止损机制
-- **动态中心价**：中心价固定首日 close，长周期回测中价格大幅偏移后网格可能失效
+- **动态中心价**：当前为静态网格（用户确认的设计选择），如需动态可参考 v6 git 历史
 - **组合回测**：当前只支持单标的
 - **形态识别**：仅底分型 + 头肩底，未做更多形态
 

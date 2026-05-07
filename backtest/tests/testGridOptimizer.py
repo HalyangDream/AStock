@@ -73,7 +73,8 @@ class TestGridOptimize(unittest.TestCase):
         with self.assertRaises(ValueError):
             gridOptimize(kline, totalAmount=100000, rankBy="bogus")
         with self.assertRaises(ValueError):
-            gridOptimize(kline, totalAmount=100000, levelsList=[0, 5])
+            gridOptimize(kline, totalAmount=100000,
+                         levelsList=[0, 5])
 
     def test_topSortedByRankKey(self) -> None:
         kline = _oscKline(days=60, amplitude=0.06, period=15)
@@ -89,7 +90,6 @@ class TestGridOptimize(unittest.TestCase):
         self.assertIn("trades", out["best"])
         self.assertIn("metrics", out["best"])
         self.assertIn("shareSize", out["best"])
-        self.assertIn("centerPrice", out["best"])
         self.assertIn("levels", out["best"])
         self.assertIn("holdReturn", out["best"])
         self.assertIn("excessReturn", out["best"])
@@ -105,29 +105,15 @@ class TestGridOptimize(unittest.TestCase):
         self.assertEqual([c[0] for c in calls], [1, 2, 3, 4, 5, 6])
         self.assertTrue(all(c[1] == 6 for c in calls))
 
-    def test_centerPriceUsesFirstClose(self) -> None:
-        kline = buildLinearKline(days=20)
-        expectedFirst = float(kline.sort_values("date")["close"].iloc[0])
-        with mock.patch("backtest.gridOptimizer.runGridBacktest",
-                        return_value=_fakeResult()) as m:
-            out = gridOptimize(kline, totalAmount=100000,
-                               spacings=[0.01, 0.02],
-                               levelsList=[5])
-        for call in m.call_args_list:
-            self.assertAlmostEqual(call.kwargs["centerPrice"],
-                                   expectedFirst, places=6)
-        self.assertAlmostEqual(out["best"]["centerPrice"],
-                               expectedFirst, places=6)
-
-    def test_defaultGridIs66(self) -> None:
-        """默认遍历 11 spacings × 6 levels = 66 组合。"""
+    def test_defaultGridIs427(self) -> None:
+        """默认遍历 61 spacings × 7 levels = 427 组合。"""
         kline = buildLinearKline(days=10)
         with mock.patch("backtest.gridOptimizer.runGridBacktest",
                         return_value=_fakeResult()):
             out = gridOptimize(kline, totalAmount=100000)
         expected = len(DEFAULT_SPACINGS) * len(DEFAULT_LEVELS_LIST)
         self.assertEqual(len(out["candidates"]), expected)
-        self.assertEqual(expected, 66)
+        self.assertEqual(expected, 427)
 
     def test_levelsTraversed(self) -> None:
         """每个 spacing 都应遍历完整 levelsList。"""

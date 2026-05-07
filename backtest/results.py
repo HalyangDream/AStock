@@ -79,3 +79,23 @@ def buildOpenPositions(openTrades: List[dict],
     df["entryDate"] = pd.to_datetime(df["entryDate"])
     df = df.sort_values("entryDate").reset_index(drop=True)
     return df[_OPEN_COLS]
+
+
+_OPEN_SUMMARY_COLS = ["avgCost", "totalShares", "lastPrice",
+                      "unrealizedPnl", "unrealizedPnlPct"]
+
+
+def buildOpenPositionsSummary(totalShares: int, avgCost: float,
+                              lastPrice: float) -> pd.DataFrame:
+    """动态基准价策略的汇总持仓（单行）。"""
+    if totalShares <= 0:
+        return pd.DataFrame(columns=_OPEN_SUMMARY_COLS)
+    cost = avgCost * totalShares
+    unreal = (lastPrice - avgCost) * totalShares
+    return pd.DataFrame([{
+        "avgCost": avgCost,
+        "totalShares": totalShares,
+        "lastPrice": lastPrice,
+        "unrealizedPnl": unreal,
+        "unrealizedPnlPct": (unreal / cost) if cost > 0 else 0.0,
+    }])

@@ -14,19 +14,21 @@ import pandas as pd
 
 from .gridEngine import runGridBacktest
 
-DEFAULT_SPACINGS = (0.005, 0.01, 0.015, 0.02, 0.025,
-                    0.03, 0.04, 0.05, 0.07, 0.10, 0.15)
-DEFAULT_LEVELS_LIST = (3, 5, 8, 10, 15, 20)
+DEFAULT_SPACINGS = tuple(
+    [round(i / 1000, 4) for i in range(10, 51)]        # 1.0%~5.0% 步进 0.1%
+    + [round(i / 1000, 4) for i in range(55, 155, 5)]  # 5.5%~15.0% 步进 0.5%
+)
+DEFAULT_LEVELS_LIST = (3, 5, 8, 10, 15, 20, 30)
 
 _RANK_KEYS = ("totalReturn", "annualReturn", "sharpe")
-_CASH_BUFFER = 0.005  # 与 GridStrategy 默认一致
+_CASH_BUFFER = 0.005
 
 
 def autoShareSize(totalAmount: float, levels: int, refPrice: float) -> int:
     """每格资金 = totalAmount / (levels × 2)，扣 cashBuffer 后折成整百股。
 
-    总资金分两半：下半用于初始底仓（最多 levels 档），上半用于后续下跌补仓弹药。
-    最少 100 股；若用户金额过小，由 GridStrategy 内现金检查兜底跳过 buy。
+    总资金分两半：下半用于买入加仓，上半用于持仓 + 盈利储备。
+    最少 100 股。
     """
     if totalAmount <= 0 or levels <= 0 or refPrice <= 0:
         raise ValueError("totalAmount / levels / refPrice 必须 > 0")
@@ -59,12 +61,14 @@ def gridOptimize(kline: pd.DataFrame,
                  levelsList: Optional[List[int]] = None,
                  rankBy: str = "totalReturn",
                  topN: int = 5,
+                 commission: float = 0.0003,
+                 stampTax: float = 0.001,
                  progressCb: Optional[
                      Callable[[int, int, dict], None]] = None,
                  ) -> dict:
     """二维寻优：遍历 spacings × levelsList，返回 top N + 最佳完整结果。
 
-    中心价 = K 线首日 close（避免未来函数偏差）。
+    基准价 = K 线首日 close（避免未来函数偏差）。
 
     Args:
         kline: K 线 DataFrame
@@ -73,6 +77,8 @@ def gridOptimize(kline: pd.DataFrame,
         levelsList: 候选层数列表，默认 DEFAULT_LEVELS_LIST
         rankBy: 排序指标 (totalReturn / annualReturn / sharpe)
         topN: 返回前 N 个候选概要
+        commission: 买卖双边佣金比例
+        stampTax: 卖出印花税比例
         progressCb: 进度回调 (idx, total, summaryDict)
 
     Returns:
@@ -120,6 +126,8 @@ def gridOptimize(kline: pd.DataFrame,
                 shareSize=shareSize,
                 centerPrice=centerPrice,
                 initialCash=totalAmount,
+                commission=commission,
+                stampTax=stampTax,
             )
             m = result["metrics"]
             totalReturn = float(m.get("totalReturn", 0.0))

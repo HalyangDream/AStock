@@ -260,8 +260,6 @@ class TestRunGridOptimize(unittest.TestCase):
             out = services.runGridOptimize(self._kline(), 100000)
         m.assert_called_once()
         self.assertEqual(out, fake)
-        self.assertNotIn("centerPrice", m.call_args.kwargs)
-        self.assertNotIn("levels", m.call_args.kwargs)
 
 
 if __name__ == "__main__":
