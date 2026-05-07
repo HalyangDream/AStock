@@ -144,7 +144,7 @@ scan.scanAll(markets=["sh", "sz"], workers=16)  # 全市场
 
 - **薄封装 backtrader**：用户只看 K 线 / 信号两个 DataFrame；引擎内部搭 `Cerebro + Strategy + Analyzer`。
 - **信号回测撮合**：T+1 开盘成交、双边佣金 0.0003、卖出印花税 0.001、A 股 100 股一手、默认全仓进出。
-- **网格回测撮合**：静态网格模型，手动模拟。基准价 = 首日 close，全程固定不变。网格线 = basePrice × (1+spacing)^n（几何级数），共上下各 gridLevels 层。建仓买 Level 0，买 Level L 以 gridLinePrice(L) 成交，卖以 gridLinePrice(L+1) 成交，每笔赚一格间距。用 OHLC 的 low/high 判断触发，单 bar 可级联多笔。
+- **网格回测撮合**：静态网格模型，手动模拟。基准价 = 首日 close，全程固定不变。网格线 = basePrice × (1+spacing)^n（几何级数），上下各 gridLevels 层。建仓买 Level 0，仅在 Level ≤ 0 买入（正档位仅作卖出目标价），买 Level L 以 gridLinePrice(L) 成交，卖以 gridLinePrice(L+1) 成交，每笔赚一格间距。用 OHLC 的 low/high 判断触发，单 bar 可级联多笔。返回含 gridInfo（网格范围、价格覆盖率）。
 - **输出**：`equityCurve` / `trades` / `metrics` / `summary` 一站式返回。
 
 ### 信号 DataFrame schema
@@ -160,7 +160,7 @@ scan.scanAll(markets=["sh", "sz"], workers=16)  # 全市场
 |---|---|
 | `runBacktest` | 主入口，输入 K 线 + 信号，返回 dict |
 | `runGridBacktest` | 静态网格回测：基准价固定，网格线 = base×(1+s)^n；参数：步长 / 层数 / 每格股数 / 佣金 / 印花税；返回 dict 含 `openPositions`（per-level） |
-| `gridOptimize` | 步长 × 层数二维寻优：遍历 11 档步长 × 6 档层数，按 rankBy 排序返回 top N |
+| `gridOptimize` | 步长 × 层数二维寻优：遍历 61 档步长（1%~15%）× 7 档层数（3~30）= 427 组合，按 rankBy 排序返回 top N |
 | `adapters.fromBottomFractal` | 底分型结果 → 信号 DataFrame（持有 holdDays 个交易日） |
 | `adapters.fromHeadShoulderBottom` | 头肩底结果 → 信号 DataFrame（突破日买入） |
 | `metrics.computeMetrics` | 由 equity + trades 算 sharpe / maxDD / 胜率等 |

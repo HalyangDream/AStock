@@ -80,7 +80,7 @@ A 股 / 基金多源数据采集、形态扫描、网格交易回测工具。四
 **`backtest/gridOptimizer.py`**：
 
 - `autoShareSize`：总资金 / (levels × 2)，一半持仓、一半补仓弹药
-- 遍历 11 档 DEFAULT_SPACINGS × 6 档 DEFAULT_LEVELS_LIST 二维寻优，按 rankBy 排序，返回 top N
+- 遍历 61 档 DEFAULT_SPACINGS（1%~5% 按 0.1%，5.5%~15% 按 0.5%）× 7 档 DEFAULT_LEVELS_LIST（3~30）= 427 组合二维寻优，按 rankBy 排序，返回 top N
 - centerPrice 自动取首日 close
 
 **`backtest/gridEngine.py`**：
@@ -88,11 +88,12 @@ A 股 / 基金多源数据采集、形态扫描、网格交易回测工具。四
 - `runGridBacktest` 搭建 Cerebro 驱动 bar 循环，撮合由策略内部手动完成
 - 参数：`gridSpacingPct / gridLevels / shareSize / centerPrice / commission / stampTax`
 - 读取 `strat._equityRecords`、`strat._tradeLog`、`strat._eventLog`、`strat._openTrades`
-- 返回 `{ equityCurve, trades, tradeEvents, openPositions, metrics, summary }`
+- 返回 `{ equityCurve, trades, tradeEvents, openPositions, metrics, summary, gridInfo }`
+- `gridInfo` 含：centerPrice / gridLines / buyRange / sellRange / gridLow / gridHigh / priceLow / priceHigh
 
 ### 2.5 网页层（稳定）
 
-- `webapp/pages/1_K线查询.py` — K 线查询 + 网格交易测试（总金额输入 → Top5 候选 + 最优详情 + 净值曲线 + 交易明细 + per-level 未平仓）
+- `webapp/pages/1_K线查询.py` — K 线查询 + 网格交易测试（总金额输入 → Top5 候选含盈亏金额 + 最优详情含初始/最终资金/总盈亏 + 网格范围信息含覆盖率 + 净值曲线 + 交易明细 + per-level 未平仓）
 - `webapp/services.py` — 纯函数封装，文案已同步为静态网格模型
 - 其他 3 个页面（行业板块 / 资金流 / 财务摘要）功能完整
 
@@ -157,7 +158,7 @@ A 股 / 基金多源数据采集、形态扫描、网格交易回测工具。四
 |---|---|
 | `backtest/_gridStrategy.py` | 网格策略核心（最近改动最多） |
 | `backtest/gridEngine.py` | 网格回测入口，搭建 Cerebro |
-| `backtest/gridOptimizer.py` | 步长寻优，遍历 11 档 spacing |
+| `backtest/gridOptimizer.py` | 步长寻优，遍历 61 档 spacing × 7 档 levels |
 | `backtest/metrics.py` | 绩效指标（pnlNet 优先） |
 | `backtest/results.py` | backtrader 输出 → DataFrame |
 | `backtest/engine.py` | 信号回测入口 |
