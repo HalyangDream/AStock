@@ -1,4 +1,6 @@
 akshare==1.18.56
+numpy==2.0.2
 pandas==2.3.3
 backtrader==1.9.78.123
+plotly==6.7.0
 streamlit==1.40.2

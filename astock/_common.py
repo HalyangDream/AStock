@@ -47,6 +47,11 @@ def detectMarket(symbol: Union[str, int]) -> str:
     s = padCode(symbol)
     if not s.isdigit() or len(s) != 6:
         raise ValueError(f"非法 6 位代码: {symbol}")
+    head2 = s[:2]
+    head3 = s[:3]
+    # 北交所：430xxx / 830xxx / 870xxx / 920xxx
+    if head2 in ("43", "83", "87", "92"):
+        return "bj"
     head = s[0]
     if head in ("5", "6", "9"):
         return "sh"

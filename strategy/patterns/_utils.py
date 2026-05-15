@@ -133,3 +133,22 @@ def lowestBetween(df: pd.DataFrame, lo: int, hi: int) -> int:
 def rollingMean(series: pd.Series, window: int) -> pd.Series:
     """滚动均值，首 window-1 行用扩展均值兜底（避免形态末端信息缺失）。"""
     return series.rolling(window=window, min_periods=1).mean()
+
+
+def calcTrendSlope(series: pd.Series, window: int) -> float:
+    """返回 series 末尾 window 个点的线性回归斜率，已按首值归一化（price/price/day）。
+
+    归一化后的斜率可跨价格量级比较：-0.001 ≈ 每日跌 0.1%。
+    数据不足 2 点或 window < 2 时返回 0.0。
+    """
+    if window < 2 or len(series) < 2:
+        return 0.0
+    tail = series.iloc[-window:]
+    if len(tail) < 2:
+        return 0.0
+    x = np.arange(len(tail), dtype=float)
+    coeffs = np.polyfit(x, tail.values.astype(float), 1)
+    base = float(tail.iloc[0])
+    if base == 0.0:
+        return 0.0
+    return float(coeffs[0]) / base

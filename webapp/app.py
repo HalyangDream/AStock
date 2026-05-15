@@ -8,8 +8,24 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+# 国内数据源（eastmoney/sina/tencent）需要直连，禁用代理
+for _k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+           "all_proxy", "ALL_PROXY"):
+    os.environ.pop(_k, None)
+os.environ["no_proxy"] = "*"
+os.environ["NO_PROXY"] = "*"
+
+import requests as _requests
+_OrigSession = _requests.Session
+class _NoProxySession(_OrigSession):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.trust_env = False
+_requests.Session = _NoProxySession
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:

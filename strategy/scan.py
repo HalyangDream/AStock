@@ -22,9 +22,28 @@ import pandas as pd
 from astock import stock as _stock
 from astock._common import detectMarket, padCode
 
-from .patterns import findBottomFractal, findHeadShoulderBottom
+from .patterns import findBottomFractal, findHeadShoulderBottom, isCurrentBottomFractal
 
 logger = logging.getLogger(__name__)
+
+_MARKET_PREFIXES = ("sh", "sz", "bj")
+
+
+def _extractCode(raw: str) -> Optional[str]:
+    """从原始 symbol 提取 6 位纯数字代码。
+
+    兼容两种格式：纯数字 '600000' 和带前缀 'sh600000' / 'bj920000'。
+    """
+    s = raw.strip().lower()
+    for prefix in _MARKET_PREFIXES:
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    s = s.zfill(6)
+    if len(s) == 6 and s.isdigit():
+        return s
+    return None
+
 
 # 全 A 实时快照缓存（用于一次性获取 name + 实时价）
 _spotCache: Optional[pd.DataFrame] = None
@@ -45,7 +64,7 @@ def _spotLookup(symbol: str) -> dict:
     spot = _loadSpot()
     if spot.empty or "symbol" not in spot.columns:
         return {"name": "", "price": None}
-    hit = spot.loc[spot["symbol"].astype(str).str.zfill(6) == code]
+    hit = spot.loc[spot["symbol"].astype(str).apply(_extractCode) == code]
     if hit.empty:
         return {"name": "", "price": None}
     row = hit.iloc[0]
@@ -65,7 +84,8 @@ def scanSingle(symbol: str,
                hsbMinSpan: int = 30,
                hsbMaxSpan: int = 120,
                realtime: bool = False,
-               kline: Optional[pd.DataFrame] = None) -> dict:
+               kline: Optional[pd.DataFrame] = None,
+               hsbKwargs: Optional[dict] = None) -> dict:
     """单只股票形态扫描。
 
     Args:
@@ -76,6 +96,7 @@ def scanSingle(symbol: str,
         realtime: True 时现价取实时快照；否则用最后收盘
         kline: 预拉好的日 K 线（列 date/open/high/low/close/volume），
                提供时不再走网络
+        hsbKwargs: 透传给 findHeadShoulderBottom 的额外参数
 
     Returns dict:
         symbol, name, currentPrice, asOfDate, lookbackDays,
@@ -104,6 +125,7 @@ def scanSingle(symbol: str,
             "lookbackDays": lookbackDays,
             "bottomFractals": pd.DataFrame(),
             "headShoulderBottoms": pd.DataFrame(),
+            "currentBottom": None,
         }
 
     if realtime and lookup["price"] is not None:
@@ -114,7 +136,9 @@ def scanSingle(symbol: str,
     asOfDate = pd.Timestamp(df["date"].iloc[-1]).strftime("%Y-%m-%d")
 
     bottoms = findBottomFractal(df, minGrade=minFractalGrade)
-    hsbs = findHeadShoulderBottom(df, minSpan=hsbMinSpan, maxSpan=hsbMaxSpan)
+    _extra = hsbKwargs or {}
+    hsbs = findHeadShoulderBottom(df, minSpan=hsbMinSpan, maxSpan=hsbMaxSpan, **_extra)
+    curBottom = isCurrentBottomFractal(df)
 
     return {
         "symbol": code,
@@ -124,6 +148,7 @@ def scanSingle(symbol: str,
         "lookbackDays": lookbackDays,
         "bottomFractals": bottoms,
         "headShoulderBottoms": hsbs,
+        "currentBottom": curBottom,
     }
 
 
@@ -146,6 +171,10 @@ def _summaryRow(res: dict) -> dict:
         "bestHsbNeckline": None,
         "bestHsbTargetClassic": None,
         "bestHsbTargetConservative": None,
+        "bestHsbLeftShoulderDate": None,
+        "bestHsbBreakoutDate": None,
+        "bestHsbBreakoutPrice": None,
+        "bestHsbNecklinePriceAtBreakout": None,
     }
     if isinstance(bf, pd.DataFrame) and not bf.empty:
         latest = bf.sort_values("centerDate").iloc[-1]
@@ -153,12 +182,38 @@ def _summaryRow(res: dict) -> dict:
         row["latestBottomGrade"] = str(latest["grade"])
         row["latestBottomLow"] = float(latest["centerLow"])
     if isinstance(hsb, pd.DataFrame) and not hsb.empty:
-        best = hsb.iloc[0]  # 已按 score 降序
+        # 取距当前最近的头肩底（按右肩日期降序，最近的排首位）
+        best = hsb.sort_values("rightShoulderDate", ascending=False).iloc[0]
         row["bestHsbStatus"] = str(best["status"])
         row["bestHsbScore"] = float(best["score"])
         row["bestHsbNeckline"] = float(best["necklinePrice"])
         row["bestHsbTargetClassic"] = float(best["targetPriceClassic"])
         row["bestHsbTargetConservative"] = float(best["targetPriceConservative"])
+        row["bestHsbLeftShoulderDate"] = (
+            pd.Timestamp(best["leftShoulderDate"]).strftime("%Y-%m-%d")
+            if pd.notna(best.get("leftShoulderDate")) else None
+        )
+        row["bestHsbBreakoutDate"] = (
+            pd.Timestamp(best["breakoutDate"]).strftime("%Y-%m-%d")
+            if pd.notna(best.get("breakoutDate")) else None
+        )
+        row["bestHsbBreakoutPrice"] = (
+            float(best["breakoutPrice"])
+            if pd.notna(best.get("breakoutPrice")) else None
+        )
+        row["bestHsbNecklinePriceAtBreakout"] = (
+            float(best["necklinePriceAtBreakout"])
+            if pd.notna(best.get("necklinePriceAtBreakout")) else None
+        )
+
+    cb = res.get("currentBottom")
+    row["isCurrentBottom"] = cb is not None
+    row["currentBottomDate"] = (
+        pd.Timestamp(cb["signalDate"]).strftime("%Y-%m-%d") if cb else None
+    )
+    row["currentBottomLow"] = float(cb["lowestLow"]) if cb else None
+    row["currentBottomPattern"] = cb.get("patternLabel") if cb else None
+
     return row
 
 
@@ -194,8 +249,9 @@ def getAllSymbols(markets: Optional[Iterable[str]] = None) -> List[str]:
     spot = _loadSpot()
     if spot.empty or "symbol" not in spot.columns:
         return []
-    raw = spot["symbol"].astype(str).str.zfill(6).tolist()
-    codes = [c for c in raw if len(c) == 6 and c.isdigit()]
+    raw = spot["symbol"].astype(str).tolist()
+    codes = [_extractCode(s) for s in raw]
+    codes = [c for c in codes if c is not None]
 
     if markets:
         allowed = {m.strip().lower() for m in markets if m}
@@ -226,7 +282,8 @@ def scanAll(markets: Optional[Iterable[str]] = None,
             limit: Optional[int] = None,
             hitOnly: bool = True,
             progress: bool = True,
-            progressEvery: int = 200) -> pd.DataFrame:
+            progressEvery: int = 200,
+            progressCb=None) -> pd.DataFrame:
     """全市场扫描。并发拉每只股票的日 K 线并识别形态，汇总命中。
 
     Args:
@@ -270,21 +327,27 @@ def scanAll(markets: Optional[Iterable[str]] = None,
                 if progress and (doneCount % progressEvery == 0 or doneCount == total):
                     _printProgress(doneCount, total, hitCount, startTime)
                 continue
-            isHit = (row.get("bottomCount") or 0) > 0 or (row.get("hsbCount") or 0) > 0
+            isHit = (
+                (row.get("bottomCount") or 0) > 0
+                or (row.get("hsbCount") or 0) > 0
+                or row.get("isCurrentBottom", False)
+            )
             if isHit:
                 hitCount += 1
             if (not hitOnly) or isHit:
                 rows.append(row)
             if progress and (doneCount % progressEvery == 0 or doneCount == total):
                 _printProgress(doneCount, total, hitCount, startTime)
+            if progressCb is not None:
+                progressCb(doneCount, total)
 
     if not rows:
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
     df = df.sort_values(
-        by=["bestHsbScore", "bottomCount"],
-        ascending=[False, False],
+        by=["bestHsbLeftShoulderDate", "bestHsbScore", "bottomCount"],
+        ascending=[False, False, False],
         na_position="last",
     ).reset_index(drop=True)
     return df
@@ -334,6 +397,18 @@ def _formatSingle(result: dict) -> str:
             if c in show.columns:
                 show[c] = show[c].astype(str).str[:10]
         lines.append(show.head(5).to_string(index=False))
+
+    lines.append("")
+    lines.append("-- 当前底分型 --")
+    cb = result.get("currentBottom")
+    if cb:
+        lines.append(
+            f"形态: {cb.get('patternLabel', '')}  "
+            f"|  日期: {pd.Timestamp(cb['signalDate']).strftime('%Y-%m-%d')}  "
+            f"|  支撑位: {cb['lowestLow']:.2f}"
+        )
+    else:
+        lines.append("(无)")
 
     return "\n".join(lines)
 

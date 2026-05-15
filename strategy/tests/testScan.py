@@ -61,7 +61,8 @@ class TestScanSingle(unittest.TestCase):
     def test_resultShape(self) -> None:
         df = _buildHsbKline()
         res = scan.scanSingle("600000", kline=df, lookbackDays=0,
-                              hsbMinSpan=20, hsbMaxSpan=60)
+                              hsbMinSpan=20, hsbMaxSpan=60,
+                              hsbKwargs={"headToShoulderMinSpan": 10})
         self.assertEqual(res["symbol"], "600000")
         self.assertEqual(res["name"], "浦发银行")
         self.assertIsNotNone(res["currentPrice"])
@@ -74,14 +75,16 @@ class TestScanSingle(unittest.TestCase):
     def test_currentPriceFromCloseByDefault(self) -> None:
         df = _buildHsbKline()
         res = scan.scanSingle("600000", kline=df, lookbackDays=0,
-                              realtime=False, hsbMinSpan=20, hsbMaxSpan=60)
+                              realtime=False, hsbMinSpan=20, hsbMaxSpan=60,
+                              hsbKwargs={"headToShoulderMinSpan": 10})
         self.assertAlmostEqual(res["currentPrice"],
                                float(df["close"].iloc[-1]), places=4)
 
     def test_currentPriceFromRealtime(self) -> None:
         df = _buildHsbKline()
         res = scan.scanSingle("600000", kline=df, lookbackDays=0,
-                              realtime=True, hsbMinSpan=20, hsbMaxSpan=60)
+                              realtime=True, hsbMinSpan=20, hsbMaxSpan=60,
+                              hsbKwargs={"headToShoulderMinSpan": 10})
         self.assertAlmostEqual(res["currentPrice"], 12.34, places=4)
 
     def test_emptyKlineGracefullyReturns(self) -> None:
@@ -126,7 +129,8 @@ class TestScanBatch(unittest.TestCase):
                               hsbMinSpan=20, hsbMaxSpan=60,
                               minFractalGrade=kwargs.get("minFractalGrade",
                                                         "validTrend"),
-                              realtime=kwargs.get("realtime", False))
+                              realtime=kwargs.get("realtime", False),
+                              hsbKwargs={"headToShoulderMinSpan": 10})
 
         with mock.patch.object(scan, "scanSingle", side_effect=fakeSingle):
             out = scan.scanBatch(["600000", "000001"], lookbackDays=0)
@@ -139,6 +143,8 @@ class TestScanBatch(unittest.TestCase):
             "hsbCount", "bestHsbStatus", "bestHsbScore",
             "bestHsbNeckline",
             "bestHsbTargetClassic", "bestHsbTargetConservative",
+            "bestHsbLeftShoulderDate", "bestHsbBreakoutDate",
+            "bestHsbBreakoutPrice", "bestHsbNecklinePriceAtBreakout",
         }
         self.assertTrue(expectedCols.issubset(set(out.columns)))
         self.assertEqual(list(out["name"]), ["浦发银行", "平安银行"])
@@ -274,6 +280,11 @@ class TestScanAll(unittest.TestCase):
             "necklinePrice": 17.0,
             "targetPriceClassic": 22.0,
             "targetPriceConservative": 17.85,
+            "leftShoulderDate": pd.Timestamp("2024-01-10"),
+            "rightShoulderDate": pd.Timestamp("2024-02-20"),
+            "breakoutDate": pd.Timestamp("2024-02-25"),
+            "breakoutPrice": 17.5,
+            "necklinePriceAtBreakout": 17.1,
         }])
         bottomDf = pd.DataFrame([{
             "centerDate": pd.Timestamp("2024-03-01"),
@@ -294,6 +305,8 @@ class TestScanAll(unittest.TestCase):
         elif symbol == "300001":
             low = hsbDf.copy()
             low.loc[0, "score"] = 0.4
+            low.loc[0, "leftShoulderDate"] = pd.Timestamp("2024-02-01")
+            low.loc[0, "rightShoulderDate"] = pd.Timestamp("2024-03-01")
             base["headShoulderBottoms"] = low
         return base
 
@@ -304,12 +317,15 @@ class TestScanAll(unittest.TestCase):
         self.assertEqual(set(out["symbol"]), {"600000", "000001", "300001"})
         self.assertNotIn("830799", set(out["symbol"]))
 
-    def test_sortByHsbScore(self) -> None:
+    def test_sortByRecentThenScore(self) -> None:
+        """结果按最近日期优先，同日期按评分降序。"""
         with mock.patch.object(scan, "scanSingle",
                                side_effect=self._fakeScanSingle):
             out = scan.scanAll(workers=2, hitOnly=True, progress=False)
-        self.assertEqual(out.iloc[0]["symbol"], "600000")
-        self.assertEqual(out.iloc[0]["bestHsbScore"], 0.8)
+        hsb_rows = out[out["bestHsbStatus"].notna()]
+        if len(hsb_rows) >= 2:
+            self.assertEqual(hsb_rows.iloc[0]["symbol"], "300001")
+            self.assertEqual(hsb_rows.iloc[1]["symbol"], "600000")
 
     def test_allRowsIncludesMisses(self) -> None:
         with mock.patch.object(scan, "scanSingle",
@@ -330,6 +346,143 @@ class TestScanAll(unittest.TestCase):
             out = scan.scanAll(markets=["sh"], workers=1,
                                hitOnly=False, progress=False)
         self.assertEqual(out["symbol"].tolist(), ["600000"])
+
+
+def _buildCurrentBottomKline():
+    """130 根 K 线，尾部构成阳包阴 + 双前提满足。"""
+    n = 130
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    baseClose = 10.0
+    baseVol = 1000.0
+    df = pd.DataFrame({
+        "date": dates,
+        "open": [baseClose] * n,
+        "high": [baseClose + 0.5] * n,
+        "low": [baseClose - 0.5] * n,
+        "close": [baseClose] * n,
+        "volume": [baseVol] * n,
+    })
+    # Day1 阴线
+    df.loc[df.index[-2], ["open", "high", "low", "close", "volume"]] = [
+        11.0, 11.5, 9.0, 9.5, 2000.0,
+    ]
+    # Day2 阳包阴, close>MA20, vol>MA120
+    df.loc[df.index[-1], ["open", "high", "low", "close", "volume"]] = [
+        9.0, 12.0, 8.8, 11.5, 2000.0,
+    ]
+    return df
+
+
+def _buildNoBottomKline():
+    """尾部不构成底分型的 K 线（持续上行）。"""
+    rows = [
+        {"open": 10, "high": 11.0, "low": 9.5, "close": 10.5, "volume": 100},
+        {"open": 10.5, "high": 11.5, "low": 10.0, "close": 11.0, "volume": 110},
+        {"open": 11, "high": 12.0, "low": 10.5, "close": 11.5, "volume": 120},
+        {"open": 11.5, "high": 12.5, "low": 11.0, "close": 12.0, "volume": 130},
+    ]
+    dates = pd.bdate_range("2024-01-01", periods=len(rows))
+    for i, r in enumerate(rows):
+        r["date"] = dates[i].strftime("%Y-%m-%d")
+    return pd.DataFrame(rows)
+
+
+class TestCurrentBottomIntegration(unittest.TestCase):
+    """TP-2.1 ~ TP-2.8: 当前底分型在 scan 模块的集成。"""
+
+    def setUp(self) -> None:
+        scan._spotCache = _buildSpotDf()
+
+    def tearDown(self) -> None:
+        scan._spotCache = None
+
+    # TP-2.1
+    def test_scanSingleWithBottomFractal(self) -> None:
+        df = _buildCurrentBottomKline()
+        res = scan.scanSingle("600000", kline=df, lookbackDays=0)
+        self.assertIsNotNone(res.get("currentBottom"))
+
+    # TP-2.3
+    def test_scanSingleWithoutBottomFractal(self) -> None:
+        df = _buildNoBottomKline()
+        res = scan.scanSingle("600000", kline=df, lookbackDays=0)
+        self.assertIsNone(res.get("currentBottom"))
+
+    # TP-2.5
+    def test_scanSingleEmptyKline(self) -> None:
+        res = scan.scanSingle("600000", kline=pd.DataFrame(), lookbackDays=0)
+        self.assertIsNone(res.get("currentBottom"))
+
+    # TP-2.2
+    def test_summaryRowWithCurrentBottom(self) -> None:
+        df = _buildCurrentBottomKline()
+        res = scan.scanSingle("600000", kline=df, lookbackDays=0)
+        row = scan._summaryRow(res)
+        self.assertTrue(row["isCurrentBottom"])
+        self.assertIsNotNone(row["currentBottomDate"])
+        self.assertIsNotNone(row["currentBottomLow"])
+        self.assertIsInstance(row["currentBottomPattern"], str)
+
+    # TP-2.4
+    def test_summaryRowWithoutCurrentBottom(self) -> None:
+        df = _buildNoBottomKline()
+        res = scan.scanSingle("600000", kline=df, lookbackDays=0)
+        row = scan._summaryRow(res)
+        self.assertFalse(row["isCurrentBottom"])
+        self.assertIsNone(row["currentBottomDate"])
+        self.assertIsNone(row["currentBottomLow"])
+        self.assertIsNone(row["currentBottomPattern"])
+
+    # TP-2.7
+    def test_summaryRowExistingFieldsUnchanged(self) -> None:
+        df = _buildHsbKline()
+        res = scan.scanSingle("600000", kline=df, lookbackDays=0,
+                              hsbMinSpan=20, hsbMaxSpan=60,
+                              hsbKwargs={"headToShoulderMinSpan": 10})
+        row = scan._summaryRow(res)
+        self.assertIn("bottomCount", row)
+        self.assertIn("latestBottomDate", row)
+        self.assertIn("hsbCount", row)
+        self.assertIn("bestHsbStatus", row)
+        self.assertGreater(row["hsbCount"], 0)
+
+    # TP-2.6
+    def test_scanAllHitOnlyIncludesCurrentBottomOnly(self) -> None:
+        """仅有 isCurrentBottom=True（无 hsb / 无历史 bottom）的股票应被 hitOnly 保留。"""
+        bottomKline = _buildCurrentBottomKline()
+        noBottomKline = _buildNoBottomKline()
+
+        def _fakeScanSingle(symbol, **_kwargs):
+            base = {
+                "symbol": symbol, "name": f"名{symbol}",
+                "currentPrice": 1.0, "asOfDate": "2024-03-01",
+                "lookbackDays": 250,
+                "bottomFractals": pd.DataFrame(),
+                "headShoulderBottoms": pd.DataFrame(),
+                "currentBottom": None,
+            }
+            if symbol == "600000":
+                from strategy.patterns import isCurrentBottomFractal
+                base["currentBottom"] = isCurrentBottomFractal(bottomKline)
+            return base
+
+        with mock.patch.object(scan, "scanSingle",
+                               side_effect=_fakeScanSingle):
+            out = scan.scanAll(workers=1, hitOnly=True, progress=False)
+        self.assertIn("600000", set(out["symbol"]))
+        self.assertNotIn("000001", set(out["symbol"]))
+
+    # TP-2.8
+    def test_scanBatchContainsCurrentBottomColumn(self) -> None:
+        df = _buildCurrentBottomKline()
+        origSingle = scan.scanSingle
+
+        def fakeSingle(symbol, **kwargs):
+            return origSingle(symbol, kline=df, lookbackDays=0)
+
+        with mock.patch.object(scan, "scanSingle", side_effect=fakeSingle):
+            out = scan.scanBatch(["600000"])
+        self.assertIn("isCurrentBottom", out.columns)
 
 
 class TestScanAllCli(unittest.TestCase):

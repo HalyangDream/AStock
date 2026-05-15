@@ -6,7 +6,10 @@ import unittest
 
 import pandas as pd
 
+import numpy as np
+
 from strategy.patterns._utils import (
+    calcTrendSlope,
     findSwingHighs,
     findSwingLows,
     highestBetween,
@@ -109,6 +112,48 @@ class TestSwingExtrema(unittest.TestCase):
         df = self._makeSeries([5, 3, 1, 2, 4], [6, 4, 2, 3, 5])
         self.assertEqual(highestBetween(df, 0, 4), 0)
         self.assertEqual(lowestBetween(df, 0, 4), 2)
+
+
+class TestCalcTrendSlope(unittest.TestCase):
+
+    def test_downtrend(self) -> None:
+        """严格下跌序列斜率应为负值。"""
+        s = pd.Series([10.0, 9.8, 9.6, 9.4, 9.2, 9.0])
+        slope = calcTrendSlope(s, window=6)
+        self.assertLess(slope, 0.0)
+
+    def test_uptrend(self) -> None:
+        """严格上涨序列斜率应为正值。"""
+        s = pd.Series([10.0, 10.2, 10.4, 10.6, 10.8, 11.0])
+        slope = calcTrendSlope(s, window=6)
+        self.assertGreater(slope, 0.0)
+
+    def test_flatReturnsNearZero(self) -> None:
+        """横盘序列斜率应接近 0。"""
+        s = pd.Series([10.0] * 20)
+        slope = calcTrendSlope(s, window=20)
+        self.assertAlmostEqual(slope, 0.0, places=6)
+
+    def test_insufficientDataReturnsZero(self) -> None:
+        """数据不足 window 时取末尾全部，单点或空返回 0。"""
+        self.assertEqual(calcTrendSlope(pd.Series([10.0]), window=5), 0.0)
+        self.assertEqual(calcTrendSlope(pd.Series([], dtype=float), window=5), 0.0)
+
+    def test_windowLessThan2ReturnsZero(self) -> None:
+        s = pd.Series([10.0, 9.0, 8.0])
+        self.assertEqual(calcTrendSlope(s, window=1), 0.0)
+
+    def test_normalizedUnit(self) -> None:
+        """斜率归一化：每日跌 1% 应约等于 -0.01（归一化后）。"""
+        prices = [100.0 * (1 - 0.01) ** i for i in range(20)]
+        s = pd.Series(prices)
+        slope = calcTrendSlope(s, window=20)
+        self.assertAlmostEqual(slope, -0.01, delta=0.002)
+
+    def test_baseZeroReturnsZero(self) -> None:
+        """首值为 0 时不除零，返回 0.0。"""
+        s = pd.Series([0.0, 1.0, 2.0])
+        self.assertEqual(calcTrendSlope(s, window=3), 0.0)
 
 
 if __name__ == "__main__":

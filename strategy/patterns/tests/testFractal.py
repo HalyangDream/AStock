@@ -6,7 +6,9 @@ import unittest
 
 import pandas as pd
 
-from strategy.patterns.fractal import findBottomFractal, findTopFractal
+from strategy.patterns.fractal import (
+    findBottomFractal, findTopFractal, isCurrentBottomFractal,
+)
 from strategy.patterns.tests._helpers import buildKline
 
 
@@ -106,6 +108,170 @@ class TestTopFractal(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertAlmostEqual(out["centerHigh"].iloc[0], 12.0)
         self.assertTrue(out["trendOk"].iloc[0])
+
+
+def _baseKline(n=130, baseClose=10.0, baseVol=1000.0):
+    """构造 n 根平稳 K 线（close=baseClose, vol=baseVol）。"""
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    return pd.DataFrame({
+        "date": dates,
+        "open": [baseClose] * n,
+        "high": [baseClose + 0.5] * n,
+        "low": [baseClose - 0.5] * n,
+        "close": [baseClose] * n,
+        "volume": [baseVol] * n,
+    })
+
+
+class TestCurrentBottomFractal(unittest.TestCase):
+    """isCurrentBottomFractal 新定义测试（课程体系三种形态 + 双前提）。"""
+
+    # ── TP-1: 阳包阴 + 双前提满足 → pattern="engulfing" ──────────────
+    def test_tp1_engulfing(self) -> None:
+        df = _baseKline()
+        # 确保 index[-3].high 足够高，使三过一不匹配
+        df.loc[df.index[-3], "high"] = 12.0
+        # Day1 阴线: close < open
+        df.loc[df.index[-2], ["open", "high", "low", "close", "volume"]] = [
+            11.0, 11.5, 9.0, 9.5, 2000.0,
+        ]
+        # Day2 阳线: close > open, 实体包住 Day1
+        df.loc[df.index[-1], ["open", "high", "low", "close", "volume"]] = [
+            9.0, 12.0, 8.8, 11.5, 2000.0,
+        ]
+        result = isCurrentBottomFractal(df)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["pattern"], "engulfing")
+        self.assertEqual(result["patternLabel"], "阳包阴")
+
+    # ── TP-2: 十字星底 → pattern="doji" ──────────────────────────────
+    def test_tp2_doji(self) -> None:
+        df = _baseKline()
+        # 十字星: 实体极小, 下影线长
+        df.loc[df.index[-1], ["open", "high", "low", "close", "volume"]] = [
+            10.5, 10.6, 9.0, 10.5, 2000.0,
+        ]
+        result = isCurrentBottomFractal(df)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["pattern"], "doji")
+        self.assertEqual(result["patternLabel"], "十字星底")
+
+    # ── TP-3: 三过一 → pattern="threeOverOne" ────────────────────────
+    def test_tp3_threeOverOne(self) -> None:
+        df = _baseKline()
+        # Day1: high=10.5 (base)
+        df.loc[df.index[-3], ["open", "high", "low", "close", "volume"]] = [
+            10.0, 10.5, 9.5, 10.0, 2000.0,
+        ]
+        # Day2: low <= Day1.low (回调)
+        df.loc[df.index[-2], ["open", "high", "low", "close", "volume"]] = [
+            10.0, 10.2, 9.2, 9.5, 2000.0,
+        ]
+        # Day3: close > Day1.high
+        df.loc[df.index[-1], ["open", "high", "low", "close", "volume"]] = [
+            9.8, 11.5, 9.6, 11.0, 2000.0,
+        ]
+        result = isCurrentBottomFractal(df)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["pattern"], "threeOverOne")
+        self.assertEqual(result["patternLabel"], "三过一")
+
+    # ── TP-4: 阳包阴但 close <= MA20 → None ─────────────────────────
+    def test_tp4_engulfingButCloseUnderMa20(self) -> None:
+        df = _baseKline()
+        # 阻止三过一匹配
+        df.loc[df.index[-3], "high"] = 12.0
+        # Day1 阴线
+        df.loc[df.index[-2], ["open", "high", "low", "close", "volume"]] = [
+            11.0, 11.5, 8.0, 8.5, 2000.0,
+        ]
+        # Day2 阳线包住 Day1, 但 close=9.0 < MA20≈10
+        df.loc[df.index[-1], ["open", "high", "low", "close", "volume"]] = [
+            8.0, 9.5, 7.8, 9.0, 2000.0,
+        ]
+        result = isCurrentBottomFractal(df)
+        self.assertIsNone(result)
+
+    # ── TP-5: 阳包阴但 vol <= MA120 → None ──────────────────────────
+    def test_tp5_engulfingButVolUnderMa120(self) -> None:
+        df = _baseKline()
+        # 阻止三过一匹配
+        df.loc[df.index[-3], "high"] = 12.0
+        # Day1 阴线
+        df.loc[df.index[-2], ["open", "high", "low", "close", "volume"]] = [
+            11.0, 11.5, 9.0, 9.5, 500.0,
+        ]
+        # Day2 阳线包住 Day1, close>MA20, 但量能不达标 (vol<=MA120=1000)
+        df.loc[df.index[-1], ["open", "high", "low", "close", "volume"]] = [
+            9.0, 12.0, 8.8, 11.5, 500.0,
+        ]
+        result = isCurrentBottomFractal(df)
+        self.assertIsNone(result)
+
+    # ── TP-6: 普通上涨 K 线（不匹配任何形态）→ None ──────────────────
+    def test_tp6_noPatternMatch(self) -> None:
+        df = _baseKline()
+        # 最后一根普通阳线，不构成任何形态
+        df.loc[df.index[-1], ["open", "high", "low", "close", "volume"]] = [
+            10.0, 10.8, 9.8, 10.5, 2000.0,
+        ]
+        result = isCurrentBottomFractal(df)
+        self.assertIsNone(result)
+
+    # ── TP-7: 空 DataFrame → None ────────────────────────────────────
+    def test_tp7_emptyDf(self) -> None:
+        df = pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+        result = isCurrentBottomFractal(df)
+        self.assertIsNone(result)
+
+    # ── TP-8: K 线不足 → None ────────────────────────────────────────
+    def test_tp8_insufficientBars(self) -> None:
+        df = _baseKline(n=2)
+        result = isCurrentBottomFractal(df)
+        self.assertIsNone(result)
+
+    # ── TP-9: 返回 dict 字段完整且类型正确 ───────────────────────────
+    def test_tp9_returnFieldsAndTypes(self) -> None:
+        df = _baseKline()
+        df.loc[df.index[-3], "high"] = 12.0
+        df.loc[df.index[-2], ["open", "high", "low", "close", "volume"]] = [
+            11.0, 11.5, 9.0, 9.5, 2000.0,
+        ]
+        df.loc[df.index[-1], ["open", "high", "low", "close", "volume"]] = [
+            9.0, 12.0, 8.8, 11.5, 2000.0,
+        ]
+        result = isCurrentBottomFractal(df)
+        self.assertIsNotNone(result)
+        self.assertIn("pattern", result)
+        self.assertIn("patternLabel", result)
+        self.assertIn("signalDate", result)
+        self.assertIn("signalPrice", result)
+        self.assertIn("lowestLow", result)
+        self.assertIn("ma20", result)
+        self.assertIn("volumeOk", result)
+        self.assertIsInstance(result["pattern"], str)
+        self.assertIsInstance(result["patternLabel"], str)
+        self.assertIsInstance(result["signalDate"], pd.Timestamp)
+        self.assertIsInstance(result["signalPrice"], float)
+        self.assertIsInstance(result["lowestLow"], float)
+        self.assertIsInstance(result["ma20"], float)
+        self.assertIsInstance(result["volumeOk"], bool)
+        self.assertTrue(result["volumeOk"])
+
+    # ── TP-10: lowestLow = 形态窗口内最低价 ──────────────────────────
+    def test_tp10_lowestLowIsWindowMin(self) -> None:
+        df = _baseKline()
+        df.loc[df.index[-3], "high"] = 12.0
+        # 阳包阴 2 根窗口; Day1 low=9.0, Day2 low=8.8 → lowestLow=8.8
+        df.loc[df.index[-2], ["open", "high", "low", "close", "volume"]] = [
+            11.0, 11.5, 9.0, 9.5, 2000.0,
+        ]
+        df.loc[df.index[-1], ["open", "high", "low", "close", "volume"]] = [
+            9.0, 12.0, 8.8, 11.5, 2000.0,
+        ]
+        result = isCurrentBottomFractal(df)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result["lowestLow"], 8.8, places=2)
 
 
 if __name__ == "__main__":

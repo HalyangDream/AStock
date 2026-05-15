@@ -20,7 +20,7 @@ from typing import List
 
 import pandas as pd
 
-from ._utils import mergeContaining, normalizeKline, rollingMean
+from ._utils import calcTrendSlope, mergeContaining, normalizeKline, rollingMean
 
 _GRADES = ("weak", "validTrend", "validVolume", "strong")
 
@@ -212,3 +212,95 @@ def findTopFractal(df: pd.DataFrame,
                          lookAhead=lookAhead, upThreshold=upThreshold,
                          lookBack=lookBack, volumeMultiplier=volumeMultiplier,
                          minGrade=minGrade)
+
+
+def isCurrentBottomFractal(
+    df: pd.DataFrame,
+    maWindow: int = 20,
+    volMaWindow: int = 120,
+    dojiBodyRatio: float = 0.2,
+    dojiShadowRatio: float = 0.6,
+) -> dict | None:
+    """检查最新 K 线是否构成课程体系底分型（三种反转组合 + 双前提）。
+
+    三种形态（按优先级）：三过一 > 阳包阴 > 十字星底。
+    两个硬性前提：close > MA20 且形态窗口内最大量 > MA120 当日值。
+    """
+    original = normalizeKline(df)
+    n = len(original)
+    if n < 1:
+        return None
+
+    _ma20 = original["close"].rolling(maWindow, min_periods=maWindow).mean()
+    _volMa120 = original["volume"].rolling(volMaWindow, min_periods=volMaWindow).mean()
+
+    lastClose = float(original["close"].iloc[-1])
+    ma20Val = _ma20.iloc[-1]
+    if pd.isna(ma20Val):
+        return None
+
+    _PATTERNS = [
+        ("threeOverOne", "三过一", 3),
+        ("engulfing", "阳包阴", 2),
+        ("doji", "十字星底", 1),
+    ]
+
+    for patternKey, patternLabel, windowSize in _PATTERNS:
+        if n < windowSize:
+            continue
+
+        window = original.iloc[-windowSize:]
+
+        matched = False
+        if patternKey == "threeOverOne":
+            d1, d2, d3 = window.iloc[0], window.iloc[1], window.iloc[2]
+            matched = (
+                float(d3["close"]) > float(d1["high"])
+                and float(d2["low"]) <= float(d1["low"])
+            )
+        elif patternKey == "engulfing":
+            d1, d2 = window.iloc[0], window.iloc[1]
+            d1IsYin = float(d1["close"]) < float(d1["open"])
+            d2IsYang = float(d2["close"]) > float(d2["open"])
+            matched = (
+                d1IsYin and d2IsYang
+                and float(d2["close"]) >= float(d1["open"])
+                and float(d2["open"]) <= float(d1["close"])
+            )
+        elif patternKey == "doji":
+            bar = window.iloc[0]
+            amplitude = float(bar["high"]) - float(bar["low"])
+            if amplitude > 0:
+                bodyRatio = abs(float(bar["close"]) - float(bar["open"])) / amplitude
+                lowerShadow = min(float(bar["open"]), float(bar["close"])) - float(bar["low"])
+                matched = (
+                    bodyRatio <= dojiBodyRatio
+                    and lowerShadow >= dojiShadowRatio * amplitude
+                )
+
+        if not matched:
+            continue
+
+        if lastClose <= float(ma20Val):
+            return None
+
+        volMa120Val = _volMa120.iloc[-1]
+        if pd.isna(volMa120Val):
+            return None
+        maxVol = float(window["volume"].max())
+        if maxVol <= float(volMa120Val):
+            return None
+
+        lowestLow = float(window["low"].min())
+        signalDate = pd.to_datetime(original["date"].iloc[-1])
+        return {
+            "pattern": patternKey,
+            "patternLabel": patternLabel,
+            "signalDate": signalDate,
+            "signalPrice": lastClose,
+            "lowestLow": lowestLow,
+            "ma20": float(ma20Val),
+            "volumeOk": True,
+        }
+
+    return None

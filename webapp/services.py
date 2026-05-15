@@ -10,9 +10,12 @@ from typing import Optional
 
 import pandas as pd
 
+from typing import Callable, Optional
+
 from astock import fund as _fund
 from astock import stock as _stock
 from astock._common import padCode
+from strategy import scan as _scan
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +166,145 @@ def lookupName(kind: str, symbol: str) -> str:
 def clearNameCache() -> None:
     """清空名称缓存（测试 / 强制刷新用）。"""
     _nameCache.clear()
+
+
+def runFullScan(
+    days: int = 250,
+    workers: int = 8,
+    markets: Optional[list] = None,
+    progressCb: Optional[Callable[[int, int], None]] = None,
+) -> pd.DataFrame:
+    """全市场扫描，返回原始汇总结果（未按形态过滤）。"""
+    if markets is None:
+        markets = ["sh", "sz"]
+    return _scan.scanAll(
+        markets=markets,
+        lookbackDays=days,
+        workers=workers,
+        hitOnly=True,
+        progress=False,
+        progressCb=progressCb,
+    )
+
+
+_CBF_COL_MAP = {
+    "symbol":               "代码",
+    "name":                 "名称",
+    "currentBottomPattern": "形态",
+    "currentBottomDate":    "信号日期",
+    "currentBottomLow":     "支撑位",
+    "currentPrice":         "现价",
+}
+_CBF_DISPLAY_COLS = list(_CBF_COL_MAP.keys())
+
+
+def filterCurrentBottomFractal(scanResult: pd.DataFrame) -> pd.DataFrame:
+    """从 scanAll 结果中过滤出底分型命中行，整形为展示 DataFrame。"""
+    if scanResult is None or scanResult.empty:
+        return pd.DataFrame()
+    df = scanResult[scanResult["isCurrentBottom"] == True].copy()
+    if df.empty:
+        return pd.DataFrame()
+    df = df.reindex(columns=_CBF_DISPLAY_COLS)
+    df = df.rename(columns=_CBF_COL_MAP)
+    for col in ("支撑位", "现价"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").round(2)
+    return df.reset_index(drop=True)
+
+
+_HSB_COL_MAP = {
+    "symbol":                      "代码",
+    "name":                        "名称",
+    "bestHsbLeftShoulderDate":     "形态起始日",
+    "bestHsbBreakoutDate":         "突破日",
+    "bestHsbNeckline":             "颈线价",
+    "bestHsbBreakoutPrice":        "买点价",
+    "bestHsbNecklinePriceAtBreakout": "动态颈线价",
+    "bestHsbTargetClassic":        "目标价(经典)",
+    "bestHsbScore":                "评分",
+    "bestHsbStatus":               "状态",
+    "currentPrice":                "现价",
+}
+
+_HSB_DISPLAY_COLS = list(_HSB_COL_MAP.keys())
+
+
+def scanHeadShoulderBottom(
+    days: int = 250,
+    workers: int = 8,
+    onlyBreakout: bool = True,
+    markets: Optional[list] = None,
+    progressCb: Optional[Callable[[int, int], None]] = None,
+    scanResult: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """扫描全 A 股头肩底形态，返回整理好列名的展示 DataFrame。
+
+    Args:
+        days: 回溯交易日数，默认 250（约 1 年）
+        workers: 并发线程数
+        onlyBreakout: True 时只返回 breakout/confirmed 状态的股票
+        markets: 市场过滤列表，默认 ['sh','sz']（跳过北交所，数据覆盖差）
+        progressCb: 进度回调 (doneCount, total)；None 则不回调
+        scanResult: 预计算的 scanAll 结果；传入时跳过 scanAll 调用
+    """
+    if markets is None:
+        markets = ["sh", "sz"]
+    if scanResult is not None:
+        df = scanResult
+    else:
+        df = _scan.scanAll(
+            markets=markets,
+            lookbackDays=days,
+            workers=workers,
+            hitOnly=True,
+            progress=False,
+            progressCb=progressCb,
+        )
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    hsb = df[df["bestHsbStatus"].notna()].copy()
+    if onlyBreakout:
+        hsb = hsb[hsb["bestHsbStatus"].isin(["breakout", "confirmed"])]
+    if hsb.empty:
+        return pd.DataFrame()
+
+    # 只保留展示列（部分列可能因旧扫描结果缺失，用 reindex 兜底）
+    hsb = hsb.reindex(columns=_HSB_DISPLAY_COLS)
+    hsb = hsb.rename(columns=_HSB_COL_MAP)
+
+    # 数值列保留 2 位小数
+    for col in ("颈线价", "买点价", "动态颈线价", "目标价(经典)", "现价"):
+        if col in hsb.columns:
+            hsb[col] = pd.to_numeric(hsb[col], errors="coerce").round(2)
+    if "评分" in hsb.columns:
+        hsb["评分"] = pd.to_numeric(hsb["评分"], errors="coerce").round(4)
+
+    return hsb.reset_index(drop=True)
+
+
+def fetchHsbChartData(symbol: str, days: int = 250) -> dict:
+    """获取单只股票 K 线 + 头肩底详细匹配数据，用于绘图。
+
+    Returns dict:
+        kline: 原始日 K 线 DataFrame（date/open/high/low/close/volume）
+        matches: 头肩底匹配 DataFrame（含 L1/L2/L3/H1/H2 坐标、颈线、评分等）
+        name: 股票名称
+    """
+    code = padCode(symbol)
+    kline = _stock.getDailyKline(code)
+    if kline is None or kline.empty:
+        return {"kline": pd.DataFrame(), "matches": pd.DataFrame(), "name": ""}
+    if days and days > 0:
+        kline = kline.tail(days).reset_index(drop=True)
+
+    result = _scan.scanSingle(code, lookbackDays=days, kline=kline)
+    return {
+        "kline": kline,
+        "matches": result.get("headShoulderBottoms", pd.DataFrame()),
+        "name": result.get("name", ""),
+    }
 
 
 def runGridOptimize(kline: pd.DataFrame,
