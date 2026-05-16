@@ -69,11 +69,13 @@ def _deriveBuyPoint(status: str, volumeDecay: bool,
     """根据状态和量能递减推导买点类型（仅 isBottom=True 有效）。"""
     if not isBottom:
         return None
+    if status == _STATUS_CONFIRMED:
+        return "rightShoulder"
     if status == _STATUS_FORMING:
         return "rightShoulder" if volumeDecay else None
     if hasPullback:
         return "pullback"
-    if status in (_STATUS_BREAKOUT, _STATUS_CONFIRMED):
+    if status == _STATUS_BREAKOUT:
         return "breakout"
     return None
 
@@ -145,9 +147,12 @@ def _findBreakout(df: pd.DataFrame,
 
             if isBottom:
                 pctBreak = close >= staticNecklinePrice * (1 + breakoutConfirmPct)
-                isRecent = (len(df) - 1 - i) <= 20
                 has3Bars = (confirmEnd - i - 1) >= 3
-                confirmed = priceHeld and pctBreak and isRecent and has3Bars
+                lastClose = float(df["close"].iloc[-1])
+                nearNeckline = lastClose <= staticNecklinePrice * 1.10
+                aboveNeckline = lastClose >= staticNecklinePrice
+                confirmed = (priceHeld and pctBreak and has3Bars
+                             and aboveNeckline and nearNeckline)
             else:
                 confirmed = priceHeld
 
@@ -270,10 +275,17 @@ def _buildMatch(df: pd.DataFrame,
         targetClassic = 2 * necklinePrice - l2Price
         targetConservative = necklinePrice * (1 - conservativeTargetPct)
 
-    if isBottom and status == _STATUS_CONFIRMED:
+    if isBottom:
+        rightShoulderAge = len(df) - 1 - l3
+        if rightShoulderAge > 30:
+            return None
+
+    if isBottom and status == _STATUS_FORMING:
         lastClose = float(df["close"].iloc[-1])
-        if lastClose >= targetClassic:
-            status = _STATUS_BREAKOUT
+        if lastClose < l2Price:
+            return None
+        if lastClose > l3Price and lastClose < necklinePrice:
+            status = _STATUS_CONFIRMED
 
     return {
         "leftShoulderIdx": l1,

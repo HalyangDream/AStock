@@ -82,7 +82,7 @@ class TestHeadShoulderBottom(unittest.TestCase):
         self.assertIn("volumeDistScore", out.columns)
 
     def test_detectForming(self) -> None:
-        """未发生突破时 status=forming。"""
+        """未突破时 status 为 forming 或 confirmed（价格在右肩~颈线之间升级为 confirmed）。"""
         df = _buildHsbKline(withBreakout=False)
         out = findHeadShoulderBottom(
             df, minSpan=20, maxSpan=60, pivotWindow=3,
@@ -91,7 +91,7 @@ class TestHeadShoulderBottom(unittest.TestCase):
             headToShoulderMinSpan=10, headToShoulderMaxSpan=65,
         )
         self.assertFalse(out.empty)
-        self.assertEqual(out["status"].iloc[0], "forming")
+        self.assertIn(out["status"].iloc[0], ("forming", "confirmed"))
         self.assertTrue(pd.isna(out["breakoutDate"].iloc[0]))
 
     def test_asymmetricShoulderRejected(self) -> None:
@@ -155,8 +155,8 @@ class TestHeadShoulderBottom(unittest.TestCase):
 
 class TestConfirmedRecent(unittest.TestCase):
 
-    def test_recentBreakoutWith3BarsConfirmed(self) -> None:
-        """突破在最近 7 日内 + 后续 3 根站稳 + 3% → confirmed。"""
+    def test_nearNecklineConfirmed(self) -> None:
+        """突破 + 3 根站稳 + 价格在颈线附近(≤10%) → confirmed。"""
         keypoints = [
             (0,  20.0, 19.0),
             (10, 15.0, 14.0),
@@ -166,7 +166,7 @@ class TestConfirmedRecent(unittest.TestCase):
             (40, 15.0, 14.0),
             (44, 17.5, 16.5),
             (47, 19.0, 17.5),
-            (50, 19.5, 18.0),
+            (50, 18.5, 17.2),
         ]
         df = interpolateKeypoints(keypoints, baseVolume=1000,
                                   volumeSpikeAt=[47, 48], volumeSpikeMul=4.0)
@@ -179,10 +179,10 @@ class TestConfirmedRecent(unittest.TestCase):
         )
         confirmed = out[out["status"] == "confirmed"]
         self.assertFalse(confirmed.empty,
-                         "近期突破 + 3 根站稳 + 3% → 应为 confirmed")
+                         "突破 + 站稳 + 价格在颈线附近 → 应为 confirmed")
 
-    def test_oldBreakoutNotConfirmed(self) -> None:
-        """突破发生在 >20 日前，即使后续站稳也不算 confirmed。"""
+    def test_priceAboveNeckline10PctNotConfirmed(self) -> None:
+        """突破后价格远超颈线（>10%），不算 confirmed。"""
         keypoints = [
             (0,  20.0, 19.0),
             (10, 15.0, 14.0),
@@ -192,8 +192,7 @@ class TestConfirmedRecent(unittest.TestCase):
             (40, 15.0, 14.0),
             (44, 17.5, 16.5),
             (47, 19.0, 17.5),
-            (50, 19.5, 18.0),
-            (80, 20.0, 18.5),
+            (50, 20.5, 19.5),
         ]
         df = interpolateKeypoints(keypoints, baseVolume=1000,
                                   volumeSpikeAt=[47, 48], volumeSpikeMul=4.0)
@@ -208,7 +207,7 @@ class TestConfirmedRecent(unittest.TestCase):
             breakouts = out[out["status"].isin(["breakout", "confirmed"])]
             for _, row in breakouts.iterrows():
                 self.assertNotEqual(row["status"], "confirmed",
-                                    "突破超过 20 日前，不应 confirmed")
+                                    "价格远超颈线 10%，不应 confirmed")
 
 
 class TestHeadShoulderTop(unittest.TestCase):
@@ -358,7 +357,7 @@ class TestTrendFilter(unittest.TestCase):
 class TestPullback(unittest.TestCase):
 
     def test_formingHasNoPullback(self) -> None:
-        """forming 状态：新列均为 None / False。"""
+        """未突破状态：新列均为 None / False。"""
         df = _buildHsbKline(withBreakout=False)
         out = findHeadShoulderBottom(
             df, minSpan=20, maxSpan=60, pivotWindow=3,
@@ -368,7 +367,7 @@ class TestPullback(unittest.TestCase):
         )
         self.assertFalse(out.empty)
         row = out.iloc[0]
-        self.assertEqual(row["status"], "forming")
+        self.assertIn(row["status"], ("forming", "confirmed"))
         self.assertIsNone(row["necklinePriceAtBreakout"])
         self.assertFalse(row["hasPullback"])
         self.assertIsNone(row["pullbackDate"])
